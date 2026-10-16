@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
   Trading Risk & Position Calculator (Crypto Edition)
-  버전: v4.2.0 — 코인 선물/마진 전용 (거래 수수료 반영 · 내장 이미지 제거)
+  버전: v4.3.0 — 코인 선물/마진 전용 (OKX 종목 선택: BTC · CL · XAU)
 -->
 <html lang="ko">
 
@@ -137,6 +137,19 @@
             -webkit-appearance: none;
         }
 
+        .grid-inputs select {
+            width: 100%;
+            background-color: var(--input-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 7px 9px;
+            color: var(--text-main);
+            font-size: 16px;
+            font-weight: 600;
+            outline: none;
+        }
+
+        .grid-inputs select:focus,
         input:not([type=checkbox]):focus {
             background-color: #FFFFFF;
             border-color: var(--accent-navy);
@@ -285,10 +298,16 @@
         </div>
 
         <div class="grid-inputs">
+            <!-- 0. 종목 (OKX USDT 무기한) — 고르면 최소 주문 수량 단위 자동 입력 -->
+            <div class="input-group full-width">
+                <label for="symbolSelect">종목 (OKX USDT 무기한)</label>
+                <select id="symbolSelect" onchange="onSymbolChange()"></select>
+            </div>
+
             <!-- 1. 전체 시드 (기본값 100) -->
             <div class="input-group">
                 <label for="totalCapital">전체 시드 (USDT)</label>
-                <input type="text" id="totalCapital" value="1000" placeholder="예: 100" inputmode="decimal"
+                <input type="text" id="totalCapital" value="100" placeholder="예: 100" inputmode="decimal"
                     pattern="[0-9.,]*" oninput="formatAndCalculate(this)">
             </div>
 
@@ -317,7 +336,7 @@
             <div class="input-group">
                 <label for="minQtyStep">최소 주문 수량 단위 (Qty Step)</label>
                 <input type="text" id="minQtyStep" value="0.0001" placeholder="예: 0.0001" inputmode="decimal"
-                    pattern="[0-9.,]*" oninput="formatAndCalculate(this)">
+                    pattern="[0-9.,]*" oninput="onStepInput(this)">
             </div>
 
             <!-- 6. 진입 예정가 -->
@@ -399,6 +418,43 @@
 
     <script>
         const MAX_LEV_RULE = 5;
+
+        // OKX USDT 무기한 계약 정보 (OKX API instruments 기준, 2026-10-15 확인)
+        // [키, 표시명, 최소 주문 수량 단위(코인 단위), 단위 표기, 1계약 크기(ctVal)]
+        const SYMBOLS = [
+            ['btc', 'BTCUSDT — 0.0001 BTC 단위', '0.0001', 'BTC', 0.01],
+            ['cl', 'CLUSDT (WTI 원유) — 0.1 CL 단위', '0.1', 'CL', 0.1],
+            ['xau', 'XAUUSDT (금) — 0.001 XAU 단위', '0.001', 'XAU', 0.001],
+            ['custom', '기타 / 직접입력', '', '', 0]
+        ];
+
+        function buildSymbolSelect() {
+            const sel = document.getElementById('symbolSelect');
+            sel.innerHTML = '';
+            SYMBOLS.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s[0];
+                opt.textContent = s[1];
+                sel.appendChild(opt);
+            });
+        }
+
+        function currentSymbol() {
+            const key = document.getElementById('symbolSelect').value;
+            return SYMBOLS.find(s => s[0] === key) || SYMBOLS[SYMBOLS.length - 1];
+        }
+
+        function onSymbolChange() {
+            const s = currentSymbol();
+            if (s[0] !== 'custom') document.getElementById('minQtyStep').value = s[2];
+            calculate();
+        }
+
+        function onStepInput(el) {
+            // 최소 주문 수량을 직접 고치면 종목 프리셋과 달라지므로 '직접입력'으로 전환
+            document.getElementById('symbolSelect').value = 'custom';
+            formatAndCalculate(el);
+        }
 
         document.querySelectorAll('.grid-inputs input').forEach(el => {
             el.addEventListener('blur', () => { window.scrollTo(0, 0); document.body.scrollTop = 0; });
@@ -524,20 +580,23 @@
             const qtyBelowMin = minQtyStep > 0 && actualCoinQty <= 0 && theoryCoinQty > 0;
             const minRiskForStep = totalCapital > 0 ? (minQtyStep * entryPrice) * lossRate / totalCapital * 100 : 0;
             const subStyle = 'font-size:0.7rem;color:var(--text-sub);font-weight:600;';
+            const sym = currentSymbol();
+            const unitStr = sym[3] ? ' ' + sym[3] : '';
+            const stepDec = (document.getElementById('minQtyStep').value.split('.')[1] || '').length;
+            const contractsStr = sym[4] > 0 ? (Math.round(actualCoinQty / sym[4] * 1e6) / 1e6) + '계약 · ' : '';
             const feeBreakdown = '가격 ' + formatNum(actualPriceLoss, 2) + ' + 수수료 ' + formatNum(actualSlFee, 2);
 
             if (qtyBelowMin) {
                 document.getElementById('maxLossAmount').innerText = formatNum(Math.round(maxLossAmount));
                 document.getElementById('positionValue').innerHTML = '<span class="danger">체결 불가 (최소 단위 미달)</span>';
-                document.getElementById('coinQty').innerHTML = '<span class="danger">0</span> <span style="font-size:0.7rem;color:var(--text-sub);font-weight:600;">(이론 ' + theoryCoinQty.toFixed(5) + ' < 최소 ' + minQtyStep + ')</span>';
+                document.getElementById('coinQty').innerHTML = '<span class="danger">0' + unitStr + '</span> <span style="font-size:0.7rem;color:var(--text-sub);font-weight:600;">(이론 ' + theoryCoinQty.toFixed(5) + ' < 최소 ' + minQtyStep + ')</span>';
             } else if (minQtyStep > 0 && actualCoinQty > 0 && actualCoinQty < theoryCoinQty) {
-                const decCount = minQtyStep < 0.0001 ? 5 : (minQtyStep < 0.001 ? 4 : (minQtyStep < 1 ? 3 : 0));
-                const qtyDisplay = minQtyStep >= 1 ? actualCoinQty.toFixed(0) + ' 계약' : actualCoinQty.toFixed(decCount);
+                const qtyDisplay = minQtyStep >= 1 ? actualCoinQty.toFixed(0) + ' 계약' : actualCoinQty.toFixed(stepDec) + unitStr;
                 document.getElementById('maxLossAmount').innerHTML = feeRate > 0
                     ? formatNum(actualMaxLoss, 2) + ' <span style="' + subStyle + '">(' + feeBreakdown + ' · 실제 ' + actualRiskPercent.toFixed(2) + '%)</span>'
                     : formatNum(actualMaxLoss, 2) + ' <span style="' + subStyle + '">(실제 ' + actualRiskPercent.toFixed(2) + '% · 이론 ' + formatNum(Math.round(maxLossAmount)) + ')</span>';
                 document.getElementById('positionValue').innerHTML = formatNum(actualPositionValue, 2) + ' <span style="font-size:0.7rem;color:var(--text-sub);font-weight:600;">(이론 ' + formatNum(Math.round(theoryPositionValue)) + ')</span>';
-                document.getElementById('coinQty').innerHTML = qtyDisplay + ' <span style="font-size:0.7rem;color:var(--text-sub);font-weight:600;">(이론 ' + theoryCoinQty.toFixed(4) + ')</span>';
+                document.getElementById('coinQty').innerHTML = qtyDisplay + ' <span style="font-size:0.7rem;color:var(--text-sub);font-weight:600;">(' + contractsStr + '이론 ' + theoryCoinQty.toFixed(Math.max(4, stepDec)) + ')</span>';
             } else {
                 if (feeRate > 0) {
                     document.getElementById('maxLossAmount').innerHTML = formatNum(actualMaxLoss, 2) + ' <span style="' + subStyle + '">(' + feeBreakdown + ')</span>';
@@ -545,7 +604,7 @@
                     document.getElementById('maxLossAmount').innerText = formatNum(Math.round(maxLossAmount));
                 }
                 document.getElementById('positionValue').innerText = formatNum(Math.round(theoryPositionValue));
-                document.getElementById('coinQty').innerText = formatNum(theoryCoinQty, 4);
+                document.getElementById('coinQty').innerText = formatNum(theoryCoinQty, 4) + unitStr;
             }
 
             const valResultDynamic = document.getElementById('valResultDynamic');
@@ -665,6 +724,7 @@
             document.getElementById('riskPercent').value = '1';
             document.getElementById('feePercent').value = '0.05';
             document.getElementById('dynamicInput').value = '';
+            document.getElementById('symbolSelect').value = 'btc';
             document.getElementById('minQtyStep').value = '0.0001';
             document.getElementById('entryPrice').value = '';
             document.getElementById('takeProfitPrice').value = '';
@@ -672,6 +732,7 @@
             clearAllResults();
         }
 
+        buildSymbolSelect();
         calculate();
     </script>
 
