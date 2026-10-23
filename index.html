@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <!--
   Trading Risk & Position Calculator (Crypto Edition)
-  버전: v4.3.0 — 코인 선물/마진 전용 (OKX 종목 선택: BTC · CL · XAU)
+  버전: v4.4.0 — 코인 선물/마진 전용 (OKX 종목 선택: BTC · CL · XAU) · 청산 여유 기준 권장 레버리지
 -->
 <html lang="ko">
 
@@ -304,10 +304,10 @@
                 <select id="symbolSelect" onchange="onSymbolChange()"></select>
             </div>
 
-            <!-- 1. 전체 시드 (기본값 1000) -->
+            <!-- 1. 전체 시드 (기본값 100) -->
             <div class="input-group">
                 <label for="totalCapital">전체 시드 (USDT)</label>
-                <input type="text" id="totalCapital" value="1000" placeholder="예: 100" inputmode="decimal"
+                <input type="text" id="totalCapital" value="100" placeholder="예: 100" inputmode="decimal"
                     pattern="[0-9.,]*" oninput="formatAndCalculate(this)">
             </div>
 
@@ -328,7 +328,7 @@
             <!-- 4. 거래소 레버리지 배수 -->
             <div class="input-group">
                 <label for="dynamicInput">거래소 레버리지 배수</label>
-                <input type="text" id="dynamicInput" value="" placeholder="예: 5" inputmode="decimal" pattern="[0-9.,]*"
+                <input type="text" id="dynamicInput" value="" placeholder="비우면 권장값" inputmode="decimal" pattern="[0-9.,]*"
                     oninput="formatAndCalculate(this)">
             </div>
 
@@ -400,11 +400,11 @@
                 <span class="result-value" id="coinQty">—</span>
             </div>
             <div class="result-row">
-                <span class="result-label">예상 청산가 (근사치)</span>
+                <span class="result-label">예상 청산가 (격리·근사)</span>
                 <span class="result-value danger" id="liqPrice">—</span>
             </div>
             <div class="result-row">
-                <span class="result-label">권장 최대 레버리지 (안전)</span>
+                <span class="result-label">권장 레버리지 (청산 여유)</span>
                 <span class="result-value highlight-navy" id="recMaxLev">—</span>
             </div>
         </div>
@@ -417,15 +417,16 @@
     </div>
 
     <script>
-        const MAX_LEV_RULE = 5;
+        // 청산 여유: 청산가까지 거리가 손절폭의 이 배수 이상이 되도록 권장 레버리지를 계산
+        const LIQ_BUFFER = 3;
 
-        // OKX USDT 무기한 계약 정보 (OKX API instruments 기준, 2026-10-15 확인)
-        // [키, 표시명, 최소 주문 수량 단위(코인 단위), 단위 표기, 1계약 크기(ctVal)]
+        // OKX USDT 무기한 계약 정보 (OKX API instruments · position-tiers 기준, 2026-10-23 확인)
+        // [키, 표시명, 최소 주문 수량 단위(코인 단위), 단위 표기, 1계약 크기(ctVal), 최대 레버리지, 유지증거금률(1구간)]
         const SYMBOLS = [
-            ['btc', 'BTCUSDT — 0.0001 BTC 단위', '0.0001', 'BTC', 0.01],
-            ['cl', 'CLUSDT (WTI 원유) — 0.1 CL 단위', '0.1', 'CL', 0.1],
-            ['xau', 'XAUUSDT (금) — 0.001 XAU 단위', '0.001', 'XAU', 0.001],
-            ['custom', '기타 / 직접입력', '', '', 0]
+            ['btc', 'BTCUSDT — 0.0001 BTC 단위', '0.0001', 'BTC', 0.01, 100, 0.004],
+            ['cl', 'CLUSDT (WTI 원유) — 0.1 CL 단위', '0.1', 'CL', 0.1, 50, 0.01],
+            ['xau', 'XAUUSDT (금) — 0.001 XAU 단위', '0.001', 'XAU', 0.001, 100, 0.004],
+            ['custom', '기타 / 직접입력', '', '', 0, 100, 0.005]
         ];
 
         function buildSymbolSelect() {
@@ -466,6 +467,7 @@
                 .forEach(id => { const e = document.getElementById(id); if (e) e.innerText = '—'; });
             document.getElementById('alertArea').innerHTML = '';
             document.getElementById('dynamicInput').classList.remove('input-danger');
+            document.getElementById('dynamicInput').placeholder = '비우면 권장값';
             document.getElementById('stopLossPrice').classList.remove('input-danger');
         }
 
@@ -570,7 +572,7 @@
             let actualCoinQty = theoryCoinQty;
             let actualPositionValue = theoryPositionValue;
             if (minQtyStep > 0) {
-                actualCoinQty = Math.floor(theoryCoinQty / minQtyStep) * minQtyStep;
+                actualCoinQty = Math.floor(theoryCoinQty / minQtyStep + 1e-9) * minQtyStep;   // 부동소수점 오차 보정
                 actualPositionValue = actualCoinQty * entryPrice;
             }
             const actualPriceLoss = actualPositionValue * slRate;
@@ -607,16 +609,24 @@
                 document.getElementById('coinQty').innerText = formatNum(theoryCoinQty, 4) + unitStr;
             }
 
-            const valResultDynamic = document.getElementById('valResultDynamic');
-            let effLeverage = dynamicVal;
-            let marginRequired = 0;
-            if (effLeverage > 0) marginRequired = actualPositionValue / effLeverage;
+            // ===== 레버리지 (격리 마진 기준) =====
+            // 청산 거리(%) ≈ (1/레버리지 − 유지증거금률) × 100
+            // 권장 레버리지 = 청산 거리 ≥ 손절폭 × LIQ_BUFFER 를 만족하는 가장 큰 정수 (OKX 최대치 이하)
+            const levCap = sym[5];
+            const mmr = sym[6];
+            const recLev = Math.max(1, Math.min(levCap, Math.floor(1 / (LIQ_BUFFER * slRate + mmr))));
+            const usingRec = !(dynamicVal > 0);
+            const effLeverage = usingRec ? recLev : dynamicVal;
+            dynamicInputEl.placeholder = '비우면 ' + recLev + '배';
 
+            const valResultDynamic = document.getElementById('valResultDynamic');
+            const marginRequired = actualPositionValue / effLeverage;
+            const recNote = usingRec ? ' <span style="' + subStyle + '">(권장 ' + recLev + '배 기준)</span>' : '';
             const isMarginOverSeed = marginRequired > totalCapital;
             if (isMarginOverSeed) {
-                valResultDynamic.innerHTML = '<span class="danger">' + formatNum(Math.round(marginRequired)) + ' <span style="font-size:0.7rem;font-weight:700;">(시드 초과 🚨)</span></span>';
+                valResultDynamic.innerHTML = '<span class="danger">' + formatNum(marginRequired, 2) + ' <span style="font-size:0.7rem;font-weight:700;">(시드 초과 🚨)</span></span>' + recNote;
             } else {
-                valResultDynamic.innerText = marginRequired > 0 ? formatNum(Math.round(marginRequired)) : '—';
+                valResultDynamic.innerHTML = (marginRequired > 0 ? formatNum(marginRequired, 2) : '—') + recNote;
             }
 
             const rrRatioEl = document.getElementById('rrRatio');
@@ -672,18 +682,13 @@
 
             const liqPriceEl = document.getElementById('liqPrice');
             const recMaxLevEl = document.getElementById('recMaxLev');
-            const maxLevByLiq = Math.floor(100 / slPercent);
-            const recommendedMax = Math.max(1, Math.min(MAX_LEV_RULE, maxLevByLiq));
-            recMaxLevEl.innerHTML = recommendedMax + '배 <span style="font-size:0.7rem;color:var(--text-sub);font-weight:600;">(권장 ≤' + MAX_LEV_RULE + ' · 청산안전 ≤' + maxLevByLiq + ')</span>';
+            recMaxLevEl.innerHTML = recLev + '배 <span style="' + subStyle + '">(청산 ≥ 손절폭 ' + LIQ_BUFFER + '배 · OKX 최대 ' + levCap + '배)</span>';
 
-            let liqDistPct = 0;
-            if (effLeverage > 0) {
-                liqDistPct = 100 / effLeverage;
-                const liqPrice = isLong ? entryPrice * (1 - 1 / effLeverage) : entryPrice * (1 + 1 / effLeverage);
-                liqPriceEl.innerText = formatPrice(liqPrice) + ' (진입 대비 ' + liqDistPct.toFixed(1) + '%)';
-            } else {
-                liqPriceEl.innerText = '—';
-            }
+            const liqDistPct = Math.max(0, (1 / effLeverage - mmr) * 100);
+            const liqPrice = isLong ? entryPrice * (1 - liqDistPct / 100) : entryPrice * (1 + liqDistPct / 100);
+            const liqMultiple = liqDistPct / slPercent;   // 청산 거리가 손절폭의 몇 배인지
+            liqPriceEl.innerHTML = formatPrice(liqPrice) + ' <span style="' + subStyle + '">(진입 대비 ' + liqDistPct.toFixed(1) + '% · 손절폭의 ' + liqMultiple.toFixed(1) + '배'
+                + (usingRec ? ' · 권장 ' + recLev + '배 기준' : '') + ')</span>';
 
             const alerts = [];
             if (isMarginOverSeed) {
@@ -709,13 +714,16 @@
                 else if (netRR < 1.5) alerts.push({ type: 'warn', icon: '⚠️', msg: '<b>손익비 열세 (R:R 1:' + netRR.toFixed(2) + rrTag + ')</b> — 1:1.5 미만. 진입 재고.' });
                 else if (netRR >= 2.0) alerts.push({ type: 'ok', icon: '🎯', msg: '<b>우수한 손익비 (R:R 1:' + netRR.toFixed(2) + rrTag + ')</b> — 손실의 ' + netRR.toFixed(1) + '배!' });
             }
-            const liqUnsafe = effLeverage > 0 && slPercent >= liqDistPct;
-            if (liqUnsafe) alerts.push({ type: 'danger', icon: '🚨', msg: '<b>손절 도달 전 청산 위험!</b> 청산 ≈ 진입 대비 ' + liqDistPct.toFixed(1) + '%인데 손절폭 ' + slPercent.toFixed(1) + '%. 레버리지를 <b>' + maxLevByLiq + '배 이하</b>로.' });
-            const overRule = effLeverage > MAX_LEV_RULE + 1e-9;
-            if (overRule) alerts.push({ type: 'warn', icon: '⚠️', msg: '레버리지 ' + effLeverage.toFixed(effLeverage % 1 === 0 ? 0 : 1) + '배 — 권장(≤' + MAX_LEV_RULE + '배) 초과.' });
-            if (alerts.length === 0 && effLeverage > 0) alerts.push({ type: 'ok', icon: '✅', msg: '레버리지 · 리스크 · 청산 여유 모두 안전 범위입니다.' });
+            const levStr = effLeverage.toFixed(effLeverage % 1 === 0 ? 0 : 1) + '배';
+            const overCap = !usingRec && dynamicVal > levCap + 1e-9;
+            const liqBeforeSL = !usingRec && liqDistPct <= slPercent;
+            const liqTight = !usingRec && !liqBeforeSL && dynamicVal > recLev + 1e-9;
+            if (overCap) alerts.push({ type: 'danger', icon: '🚫', msg: '<b>OKX 최대 레버리지(' + levCap + '배) 초과</b> — 이 레버리지로는 주문이 안 됩니다.' });
+            if (liqBeforeSL) alerts.push({ type: 'danger', icon: '🚨', msg: '<b>손절 전에 청산됩니다!</b> ' + levStr + '면 청산까지 ' + liqDistPct.toFixed(2) + '%인데 손절폭은 ' + slPercent.toFixed(2) + '%. 레버리지를 <b>' + recLev + '배 이하</b>로 낮추세요.' });
+            else if (liqTight) alerts.push({ type: 'warn', icon: '⚠️', msg: '<b>청산 여유 부족</b> — ' + levStr + '면 청산 거리가 손절폭의 ' + liqMultiple.toFixed(1) + '배뿐입니다 (권장 ' + LIQ_BUFFER + '배 이상). 꼬리 한 번에 청산될 수 있어요. <b>' + recLev + '배 이하</b> 권장.' });
+            if (alerts.length === 0 && !usingRec) alerts.push({ type: 'ok', icon: '✅', msg: levStr + ' — 청산 거리가 손절폭의 ' + liqMultiple.toFixed(1) + '배. 리스크 · 청산 여유 모두 안전 범위입니다.' });
             renderAlerts(alerts);
-            dynamicInputEl.classList.toggle('input-danger', overRule || liqUnsafe || isMarginOverSeed);
+            dynamicInputEl.classList.toggle('input-danger', overCap || liqBeforeSL || liqTight || isMarginOverSeed);
         }
 
         // ===== 초기화 =====
